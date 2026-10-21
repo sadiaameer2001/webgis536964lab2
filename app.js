@@ -1,58 +1,154 @@
-const pakistanLimits = L.latLngBounds([21.5, 58.5], [39.0, 80.5]);
 const map = L.map('map', {
-  maxBounds: pakistanLimits,
-  maxBoundsViscosity: 1.0,
-  minZoom: 5
-}).setView([30.3753, 69.3451], 5);
+  center: [30.3753, 69.3451],
+  zoom: 5,
+  minZoom: 5,
+  maxZoom: 14,
+  maxBounds: [[21.5, 58.5], [39.0, 80.5]],
+  maxBoundsViscosity: 1.0
+});
 
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
-}).addTo(map);
+});
+const positron = L.tileLayer(
+  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  maxZoom: 19,
+  subdomains: 'abcd',
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+});
+const imagery = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 19,
+  attribution: 'Tiles &copy; Esri'
+});
+positron.addTo(map);
 
-let districts = null;
-let layer = null;
+const layerControl = L.control.layers(
+  { 'Light (Carto Positron)': positron, 'OpenStreetMap': osm, 'Satellite (Esri)': imagery },
+  {},
+  { collapsed: false }
+).addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
 
 function show(value) {
   if (value === null || value === undefined || value === '') return 'not recorded';
   return typeof value === 'number' ? value.toLocaleString() : value;
 }
-
-function colourFor(population) {
-  if (population === null || population === undefined || population === '') return '#c9cfd1';
-  if (population > 3000000) return '#7f2704';
-  if (population > 1500000) return '#d94801';
-  if (population > 750000) return '#f16913';
-  if (population > 300000) return '#fd8d3c';
-  return '#fdd0a2';
+function densityOf(p) {
+  if (p.pop_2023 === null || p.pop_2023 === undefined) return null;
+  return p.pop_2023 / p.area_km2;
 }
-
+function colourFor(density) {
+  if (density === null) return '#c9cfd1';
+  if (density > 1000) return '#08306b';
+  if (density > 400) return '#2171b5';
+  if (density > 150) return '#4292c6';
+  if (density > 50) return '#9ecae1';
+  return '#deebf7';
+}
 function styleFor(feature) {
   return { color: '#ffffff', weight: 1,
-           fillColor: colourFor(feature.properties.pop_2023), fillOpacity: 0.8 };
+           fillColor: colourFor(densityOf(feature.properties)), fillOpacity: 0.8 };
 }
 
-function draw(features) {
-  if (layer) map.removeLayer(layer);
-  layer = L.geoJSON({ type: 'FeatureCollection', features: features }, {
-    style: styleFor,
-    onEachFeature: function (feature, featureLayer) {
-      const p = feature.properties;
-      featureLayer.bindPopup(
-        '<strong>' + show(p.district) + '</strong><br>' +
-        'Province: ' + show(p.province) + '<br>' +
-        'Population: ' + show(p.pop_2023) + '<br>' +
-        'Area: ' + show(p.area_km2) + ' km<sup>2</sup>'
-      );
-    }
-  }).addTo(map);
-  if (features.length > 0) map.fitBounds(layer.getBounds());
-  document.getElementById('count').textContent = features.length + ' districts';
+const districtGroup = L.featureGroup().addTo(map);
+layerControl.addOverlay(districtGroup, 'Population density');
+
+map.createPane('symbols');
+map.getPane('symbols').style.zIndex = 450;
+
+function radiusFor(population) {
+  return Math.sqrt(population) / 160;
+}
+function circleFor(feature, latlng) {
+  return L.circleMarker(latlng, {
+    pane: 'symbols',
+    radius: radiusFor(feature.properties.pop_2023),
+    color: '#7c2d12', weight: 1, fillColor: '#f97316', fillOpacity: 0.7
+  }).bindTooltip(feature.properties.district + ': ' +
+                 feature.properties.pop_2023.toLocaleString());
+}
+function hasPopulation(feature) {
+  return feature.properties.pop_2023 !== null;
+}
+const circleGroup = L.featureGroup().addTo(map);
+layerControl.addOverlay(circleGroup, 'Population');
+
+const info = L.control({ position: 'topleft' });
+info.onAdd = function () {
+  this._div = L.DomUtil.create('div', 'info');
+  L.DomEvent.disableClickPropagation(this._div);
+  L.DomEvent.disableScrollPropagation(this._div);
+  this.update();
+  return this._div;
+};
+info.update = function (p) {
+  const zoom = '<div class="muted">Zoom level ' + map.getZoom() + '</div>';
+  if (!p) {
+    this._div.innerHTML = '<h4>District</h4>' +
+      '<div class="muted">Hover over a district</div>' + zoom;
+    return;
+  }
+  const d = densityOf(p);
+  this._div.innerHTML =
+    '<h4>' + p.district + '</h4>' + p.province + '<br>' +
+    'Population: ' + show(p.pop_2023) + '<br>' +
+    'Area: ' + show(p.area_km2) + ' km<sup>2</sup><br>' +
+    'Density: ' + (d === null ? 'not recorded'
+      : Math.round(d).toLocaleString() + ' per km<sup>2</sup>') + zoom;
+};
+info.addTo(map);
+
+let allDistricts = null;
+let allPoints = null;
+let districts = null;
+
+function highlight(e) {
+  e.target.setStyle({ weight: 3, color: '#1a202c', fillOpacity: 0.95 });
+  e.target.bringToFront();
+  info.update(e.target.feature.properties);
+}
+function unhighlight(e) {
+  districts.resetStyle(e.target);
+  info.update();
+}
+function zoomToDistrict(e) {
+  map.fitBounds(e.target.getBounds(), { padding: [20, 20] });
+}
+function bindDistrict(feature, layer) {
+  layer.bindTooltip(feature.properties.district, { sticky: true });
+  layer.on({ mouseover: highlight, mouseout: unhighlight, click: zoomToDistrict });
+}
+
+function draw(province) {
+  const keep = function (feature) {
+    return province === 'all' || feature.properties.province === province;
+  };
+  districtGroup.clearLayers();
+  circleGroup.clearLayers();
+  districts = L.geoJSON(allDistricts, {
+    filter: keep, style: styleFor, onEachFeature: bindDistrict
+  });
+  districtGroup.addLayer(districts);
+  circleGroup.addLayer(L.geoJSON(allPoints, {
+    filter: function (f) { return keep(f) && hasPopulation(f); },
+    pointToLayer: circleFor
+  }));
+  const n = districts.getLayers().length;
+  if (n > 0) map.fitBounds(districts.getBounds());
+  document.getElementById('count').textContent = n + ' districts';
+}
+
+async function loadJSON(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(path + ': status ' + response.status);
+  return response.json();
 }
 
 function fillProvinceList() {
   const select = document.getElementById('province');
-  const provinces = [...new Set(districts.features.map(f => f.properties.province))].sort();
+  const provinces = [...new Set(allDistricts.features.map(f => f.properties.province))].sort();
   for (const name of provinces) {
     const option = document.createElement('option');
     option.value = name;
@@ -60,40 +156,82 @@ function fillProvinceList() {
     select.appendChild(option);
   }
 }
+document.getElementById('province').addEventListener('change', function (event) {
+  draw(event.target.value);
+});
 
 async function loadData() {
-  const response = await fetch('data/districts.geojson');
-  if (!response.ok) {
-    console.error('Request failed with status', response.status);
+  try {
+    [allDistricts, allPoints] = await Promise.all([
+      loadJSON('data/districts.geojson'),
+      loadJSON('data/district_points.geojson')
+    ]);
+  } catch (err) {
+    console.error('Could not load the data.', err);
+    document.getElementById('count').textContent = 'data failed to load';
     return;
   }
-  districts = await response.json();
-  console.log('features:', districts.features.length);
-  console.log('first feature:', districts.features[0]);
-  console.log('properties:', districts.features[0].properties);
   fillProvinceList();
-  draw(districts.features);
+  draw('all');
 }
-
-document.getElementById('province').addEventListener('change', function (event) {
-  const chosen = event.target.value;
-  const subset = chosen === 'all'
-    ? districts.features
-    : districts.features.filter(f => f.properties.province === chosen);
-  draw(subset);
-});
 
 const legend = L.control({ position: 'bottomright' });
 legend.onAdd = function () {
   const div = L.DomUtil.create('div', 'legend');
-  const breaks = [0, 300000, 750000, 1500000, 3000000];
-  const labels = ['under 300k', '300k to 750k', '750k to 1.5m', '1.5m to 3m', 'over 3m'];
+  const breaks = [0, 50, 150, 400, 1000];
+  const labels = ['under 50', '50 to 150', '150 to 400', '400 to 1,000', 'over 1,000'];
+  div.innerHTML = '<strong>People per km<sup>2</sup></strong><br>';
   for (let i = 0; i < breaks.length; i++) {
     div.innerHTML += '<i style="background:' + colourFor(breaks[i] + 1) + '"></i> ' + labels[i] + '<br>';
   }
   div.innerHTML += '<i style="background:' + colourFor(null) + '"></i> no census data';
+
+  const sizes = [10000000, 4000000, 1000000];
+  const rMax = radiusFor(sizes[0]);
+  const pad = 6;
+  const base = pad + 2 * rMax;
+  let svg = '<svg width="' + (2 * rMax + 75) + '" height="' + (base + 2) + '">';
+  for (const s of sizes) {
+    const r = radiusFor(s);
+    const top = base - 2 * r;
+    svg += '<circle cx="' + (rMax + 1) + '" cy="' + (base - r) + '" r="' + r +
+           '" fill="#f97316" fill-opacity=".2" stroke="#7c2d12"/>' +
+           '<line x1="' + (rMax + 1) + '" y1="' + top + '" x2="' + (2 * rMax + 14) +
+           '" y2="' + top + '" stroke="#7c2d12" stroke-width=".6"/>' +
+           '<text x="' + (2 * rMax + 17) + '" y="' + (top + 3.5) +
+           '" font-size="10">' + (s / 1000000) + ' million</text>';
+  }
+  svg += '</svg>';
+  div.innerHTML += '<div class="circles"><strong>Population</strong>' + svg + '</div>';
+
+  L.DomEvent.disableClickPropagation(div);
   return div;
 };
 legend.addTo(map);
+
+const nust = [33.6423, 72.9906];
+const nustGroup = L.featureGroup([
+  L.circle(nust, { radius: 25000, color: '#0f766e', weight: 2, fillOpacity: 0.08 }),
+  L.circleMarker(nust, { radius: 6, color: '#0f766e', fillColor: '#0f766e', fillOpacity: 1 })
+]).bindTooltip('NUST H-12: a 25 km circle and a 6 pixel circleMarker');
+layerControl.addOverlay(nustGroup, 'NUST, 25 km');
+
+function showCoordinates(e) {
+  L.popup()
+    .setLatLng(e.latlng)
+    .setContent(e.latlng.lat.toFixed(4) + ', ' + e.latlng.lng.toFixed(4))
+    .openOn(map);
+}
+document.getElementById('coords').addEventListener('change', function (event) {
+  if (event.target.checked) {
+    map.on('click', showCoordinates);
+  } else {
+    map.off('click', showCoordinates);
+  }
+});
+
+map.on('zoomend', function () {
+  info.update();
+});
 
 loadData();
